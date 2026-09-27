@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { operatorRegistry } from "lib";
+import { ParsedSignature } from "lib/HelperClasses/ParsedSignature";
 import LogicProgrammerVisualOutput from "../../components/LogicProgrammerVisualOutput.vue";
 import StepDisplayPanels from "../../components/StepDisplayPanels.vue";
 import Tile from "../../components/Tile.vue";
@@ -12,7 +13,12 @@ const props = defineProps<{
   operatorKey: string;
 }>();
 
+type OperatorPageInstance = {
+  getParsedSignature(): ParsedSignature;
+};
+
 type OperatorPageClass = {
+  new (normalizeSignature?: boolean): OperatorPageInstance;
   internalName: string;
   nicknames: string[];
   interactName: string;
@@ -25,6 +31,115 @@ const operatorClass = computed(() => {
   return operatorRegistry[
     props.operatorKey as keyof typeof operatorRegistry
   ] as unknown as OperatorPageClass;
+});
+
+const SIGNATURE_ARROW = "\u2192";
+
+type OperatorSignatureSlot = {
+  label: string;
+  text: string;
+};
+
+type OperatorSignatureDisplay = {
+  main: string;
+  slots: OperatorSignatureSlot[];
+};
+
+const signatureLetter = (index: number): string => {
+  let remaining = index;
+  let label = "";
+  do {
+    label = String.fromCharCode(65 + (remaining % 26)) + label;
+    remaining = Math.floor(remaining / 26) - 1;
+  } while (remaining >= 0);
+  return label;
+};
+
+const buildOperatorSignature = (
+  root: TypeRawSignatureAST.RawSignatureNode
+): OperatorSignatureDisplay => {
+  const operatorNumbers = new Map<
+    TypeRawSignatureAST.RawSignatureNode,
+    number
+  >();
+  const anyLetters = new Map<number, string>();
+  const slots: {
+    label: number;
+    obscured: TypeRawSignatureAST.RawSignatureFunction;
+  }[] = [];
+
+  const anyLetter = (typeID: number): string => {
+    if (!anyLetters.has(typeID)) {
+      anyLetters.set(typeID, signatureLetter(anyLetters.size));
+    }
+    return anyLetters.get(typeID)!;
+  };
+
+  const assign = (node: TypeRawSignatureAST.RawSignatureNode): void => {
+    switch (node.type) {
+      case "Function":
+        assign(node.from);
+        assign(node.to);
+        return;
+      case "Operator": {
+        const label = operatorNumbers.size + 1;
+        operatorNumbers.set(node, label);
+        slots.push({ label, obscured: node.obscured });
+        assign(node.obscured);
+        return;
+      }
+      case "List":
+        assign(node.listType);
+        return;
+      case "Any":
+        anyLetter(node.typeID);
+        return;
+      default:
+        return;
+    }
+  };
+
+  const render = (
+    node: TypeRawSignatureAST.RawSignatureNode,
+    isReturnPosition = false
+  ): string => {
+    switch (node.type) {
+      case "Function": {
+        const body = `${render(node.from)} ${SIGNATURE_ARROW} ${render(
+          node.to,
+          true
+        )}`;
+        return isReturnPosition ? `(${body})` : body;
+      }
+      case "Operator":
+        return `Operator<${operatorNumbers.get(node) ?? "?"}>`;
+      case "List":
+        return `List<${render(node.listType)}>`;
+      case "Any":
+        return `Any<${anyLetter(node.typeID)}>`;
+      default:
+        return node.type;
+    }
+  };
+
+  assign(root);
+
+  return {
+    main: render(root),
+    slots: slots.map(({ label, obscured }) => ({
+      label: `${label}`,
+      text: render(obscured),
+    })),
+  };
+};
+
+const operatorSignature = computed<OperatorSignatureDisplay | null>(() => {
+  try {
+    const operator = new operatorClass.value(false);
+    return buildOperatorSignature(operator.getParsedSignature().getAst());
+  } catch {
+    return null;
+  }
 });
 
 const variableId = ref(0);
@@ -108,6 +223,22 @@ const operatorRows = (cols: number) =>
             <template v-if="operatorClass.tooltipInfo">
               <dt>Description</dt>
               <dd>{{ operatorClass.tooltipInfo }}</dd>
+            </template>
+
+            <template v-if="operatorSignature">
+              <dt>Signature</dt>
+              <dd class="operator-signature">
+                <div class="operator-signature-main">
+                  {{ operatorSignature.main }}
+                </div>
+                <div
+                  v-for="slot in operatorSignature.slots"
+                  :key="slot.label"
+                  class="operator-signature-slot"
+                >
+                  {{ slot.label }}: {{ slot.text }}
+                </div>
+              </dd>
             </template>
           </div>
         </dl>
@@ -194,3 +325,20 @@ const operatorRows = (cols: number) =>
     </TileGrid>
   </article>
 </template>
+
+<style scoped>
+.operator-signature {
+  display: grid;
+  gap: 0.2rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9rem;
+}
+
+.operator-signature-main {
+  overflow-wrap: anywhere;
+}
+
+.operator-signature-slot {
+  color: #4a6974;
+}
+</style>
